@@ -12,6 +12,7 @@ import me.bounser.nascraft.market.unit.Item;
 import me.bounser.nascraft.config.Config;
 import org.bukkit.Bukkit;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
 import java.awt.image.BufferedImage;
@@ -39,6 +40,13 @@ public class MarketManager {
     private int operationsLastHour = 0;
 
     private List<String> ignoredKeys = new ArrayList<>();
+
+    // Master toggle for Lore-insensitive matching. true => a stack that only
+    // carries Lore still matches its market entry and can be sold/bought.
+    // Flip to false to restore the original strict behaviour without reverting.
+    private boolean ignoreLore = true;
+
+    private boolean nbtStripWarned = false;
 
     ZoneOffset offset = ZonedDateTime.now(ZoneId.systemDefault()).getOffset();
 
@@ -230,12 +238,49 @@ public class MarketManager {
         ItemStack itemStackWithoutFlags1 = itemStack1.clone();
         ItemStack itemStackWithoutFlags2 = itemStack2.clone();
 
-        for (String ignoredKey : ignoredKeys) {
-            keyStripper.strip(itemStackWithoutFlags1, ignoredKey);
-            keyStripper.strip(itemStackWithoutFlags2, ignoredKey);
+        // Lore-insensitive matching: strip the Lore component from BOTH clones using
+        // the plain Bukkit ItemMeta API (no NBT-API involved), so a stack that only
+        // differs by Lore still matches its market entry. Only the throw-away clones
+        // are touched -- the player's real stack keeps its Lore.
+        if (ignoreLore) {
+            stripLore(itemStackWithoutFlags1);
+            stripLore(itemStackWithoutFlags2);
+        }
+
+        // ignoredKeys stripping relies on NBT-API, which can fail class-init on
+        // unsupported versions (MC 26.2). Guard it so a broken NBT-API never breaks
+        // market matching: Lore is already handled above; just skip NBT key stripping.
+        if (!ignoredKeys.isEmpty()) {
+            try {
+                for (String ignoredKey : ignoredKeys) {
+                    keyStripper.strip(itemStackWithoutFlags1, ignoredKey);
+                    keyStripper.strip(itemStackWithoutFlags2, ignoredKey);
+                }
+            } catch (Throwable t) {
+                if (!nbtStripWarned) {
+                    nbtStripWarned = true;
+                    LOGGER.warning("ignored-keys stripping via NBT-API failed (" + t.getClass().getName() + "); continuing with Bukkit-only matching (Lore ignored).");
+                }
+            }
         }
 
         return itemStackWithoutFlags1.isSimilar(itemStackWithoutFlags2);
+    }
+
+    /**
+     * Remove the Lore component from a (clone) ItemStack via the Bukkit ItemMeta API.
+     * Version-safe; never throws for the normal case.
+     */
+    private void stripLore(ItemStack stack) {
+        if (stack == null) return;
+        ItemMeta meta = stack.getItemMeta();
+        if (meta == null) return;
+        try {
+            if (meta.hasLore()) {
+                meta.setLore((List<String>) null);
+                stack.setItemMeta(meta);
+            }
+        } catch (Throwable ignored) { /* leave clone as-is */ }
     }
 
     public List<Item> getTopGainers(int quantity) {
